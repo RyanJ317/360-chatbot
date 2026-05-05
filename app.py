@@ -1,5 +1,7 @@
 import os
 import sys
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import anthropic
@@ -9,6 +11,16 @@ load_dotenv(override=True)
 
 app = Flask(__name__)
 client = anthropic.Anthropic()
+
+LOG_FILE = os.path.join(os.path.dirname(__file__), "leads_log.txt")
+
+def log_conversation(session_id: str, user_message: str, andy_response: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{ts}] session={session_id}\n")
+        f.write(f"  USER : {user_message}\n")
+        f.write(f"  ANDY : {andy_response}\n")
+        f.write("\n")
 
 # ---------------------------------------------------------------------------
 # System prompt — cached on every request (stable prefix)
@@ -169,6 +181,46 @@ conversations: dict[str, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
+# Email helper
+# ---------------------------------------------------------------------------
+def email_lead(lead: dict) -> None:
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
+
+    print(f"[EMAIL] GMAIL_USER={'set' if gmail_user else 'NOT SET'} | GMAIL_APP_PASSWORD={'set' if gmail_password else 'NOT SET'}", flush=True)
+
+    if not gmail_user or not gmail_password:
+        print("[EMAIL] ERROR: Missing credentials — email not sent. Set GMAIL_USER and GMAIL_APP_PASSWORD in environment.", flush=True)
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    body = (
+        f"New lead captured at {ts}\n\n"
+        f"Name:  {lead.get('name', 'N/A')}\n"
+        f"Phone: {lead.get('phone', 'N/A')}\n"
+        f"Issue: {lead.get('issue', 'N/A')}\n\n"
+        f"— 360 Heating & Cooling Chatbot"
+    )
+    msg = MIMEText(body)
+    msg["Subject"] = f"New Lead: {lead.get('name', 'Unknown')} — 360 H&C"
+    msg["From"] = gmail_user
+    msg["To"] = gmail_user
+
+    try:
+        print(f"[EMAIL] Connecting to smtp.gmail.com:465 as {gmail_user}...", flush=True)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_password)
+            server.sendmail(gmail_user, gmail_user, msg.as_string())
+        print("[EMAIL] Lead email sent successfully.", flush=True)
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[EMAIL] AUTH ERROR: Invalid credentials — {e}", flush=True)
+    except smtplib.SMTPException as e:
+        print(f"[EMAIL] SMTP ERROR: {e}", flush=True)
+    except Exception as e:
+        print(f"[EMAIL] UNEXPECTED ERROR: {type(e).__name__}: {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Terminal lead display
 # ---------------------------------------------------------------------------
 def print_lead(lead: dict) -> None:
@@ -244,6 +296,7 @@ def chat():
                 if hasattr(block, "type") and block.type == "tool_use":
                     if block.name == "capture_lead" and not lead_captured:
                         print_lead(block.input)
+                        email_lead(block.input)
                         lead_captured = True
                         tool_results.append(
                             {
@@ -272,6 +325,7 @@ def chat():
         "I'm sorry, I ran into an issue. Please call us directly at 330-883-2713."
     )
     print(f"\n[ANTHROPIC RESPONSE]\n{reply}\n", flush=True)
+    log_conversation(session_id, user_message, reply)
     return jsonify({"response": reply})
 
 
