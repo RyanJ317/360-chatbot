@@ -1,7 +1,6 @@
 import os
 import sys
-import smtplib
-from email.mime.text import MIMEText
+import urllib.request
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import anthropic
@@ -181,43 +180,34 @@ conversations: dict[str, list[dict]] = {}
 
 
 # ---------------------------------------------------------------------------
-# Email helper
+# ntfy.sh push notification
 # ---------------------------------------------------------------------------
-def email_lead(lead: dict) -> None:
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
+NTFY_TOPIC = "360hc-leads-rj317"  # subscribe to this topic in the ntfy app
 
-    print(f"[EMAIL] GMAIL_USER={'set' if gmail_user else 'NOT SET'} | GMAIL_APP_PASSWORD={'set' if gmail_password else 'NOT SET'}", flush=True)
-
-    if not gmail_user or not gmail_password:
-        print("[EMAIL] ERROR: Missing credentials — email not sent. Set GMAIL_USER and GMAIL_APP_PASSWORD in environment.", flush=True)
-        return
-
+def notify_lead(lead: dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     body = (
-        f"New lead captured at {ts}\n\n"
-        f"Name:  {lead.get('name', 'N/A')}\n"
+        f"Name: {lead.get('name', 'N/A')}\n"
         f"Phone: {lead.get('phone', 'N/A')}\n"
-        f"Issue: {lead.get('issue', 'N/A')}\n\n"
-        f"— 360 Heating & Cooling Chatbot"
-    )
-    msg = MIMEText(body)
-    msg["Subject"] = f"New Lead: {lead.get('name', 'Unknown')} — 360 H&C"
-    msg["From"] = gmail_user
-    msg["To"] = gmail_user
+        f"Issue: {lead.get('issue', 'N/A')}\n"
+        f"Time: {ts}"
+    ).encode("utf-8")
 
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{NTFY_TOPIC}",
+        data=body,
+        headers={
+            "Title": f"New Lead: {lead.get('name', 'Unknown')}",
+            "Priority": "high",
+            "Tags": "telephone_receiver,wrench",
+        },
+        method="POST",
+    )
     try:
-        print(f"[EMAIL] Connecting to smtp.gmail.com:465 as {gmail_user}...", flush=True)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, gmail_user, msg.as_string())
-        print("[EMAIL] Lead email sent successfully.", flush=True)
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"[EMAIL] AUTH ERROR: Invalid credentials — {e}", flush=True)
-    except smtplib.SMTPException as e:
-        print(f"[EMAIL] SMTP ERROR: {e}", flush=True)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"[NTFY] Notification sent (HTTP {resp.status})", flush=True)
     except Exception as e:
-        print(f"[EMAIL] UNEXPECTED ERROR: {type(e).__name__}: {e}", flush=True)
+        print(f"[NTFY] ERROR: {type(e).__name__}: {e}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +286,7 @@ def chat():
                 if hasattr(block, "type") and block.type == "tool_use":
                     if block.name == "capture_lead" and not lead_captured:
                         print_lead(block.input)
-                        email_lead(block.input)
+                        notify_lead(block.input)
                         lead_captured = True
                         tool_results.append(
                             {
